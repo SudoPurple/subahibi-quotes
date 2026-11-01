@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files (optional if user wants to keep quotes.json outside git or gzip it)
+*.log
+.DS_Store

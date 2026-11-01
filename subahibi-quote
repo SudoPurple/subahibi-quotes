@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""
+SubaHibi Quote of the Day / Terminal Greeting
+Displays a minimalist random quote from Subarashiki Hibi (Wonderful Everyday)
+Extracted directly from the game's original files.
+Instant startup via pre-indexed seek (< 1ms).
+"""
+
+import argparse
+import json
+import os
+import random
+import shutil
+import struct
+import subprocess
+import sys
+import textwrap
+
+DATA_DIR = os.path.expanduser('~/.local/share/subahibi-quotes')
+QUOTES_JSON = os.path.join(DATA_DIR, 'quotes.json')
+QUOTES_JSONL = os.path.join(DATA_DIR, 'quotes.jsonl')
+QUOTES_IDX = os.path.join(DATA_DIR, 'quotes.idx')
+EXTRACTOR_SCRIPT = os.path.join(DATA_DIR, 'extractor.py')
+
+
+def supports_color():
+    if 'NO_COLOR' in os.environ or os.environ.get('TERM') == 'dumb':
+        return False
+    return sys.stdout.isatty()
+
+
+USE_COLOR = supports_color()
+
+
+def col(code, text):
+    if not USE_COLOR:
+        return text
+    return f'\033[{code}m{text}\033[0m'
+
+
+# Aesthetic Pastel Palette (Catppuccin inspired)
+CYAN = '38;2;137;220;235'
+PURPLE = '38;2;203;166;247'
+ROSE = '38;2;245;194;231'
+PEACH = '38;2;250;179;135'
+GRAY = '38;2;147;154;183'
+DIM = '2'
+BOLD = '1'
+ITALIC = '3'
+
+
+def build_index_if_needed():
+    """Ensure JSONL and binary offset index exist for sub-millisecond lookups."""
+    if os.path.exists(QUOTES_JSONL) and os.path.exists(QUOTES_IDX) and os.path.getsize(QUOTES_IDX) > 0:
+        return True
+
+    if not os.path.exists(QUOTES_JSON):
+        if os.path.exists(EXTRACTOR_SCRIPT):
+            subprocess.run([sys.executable, EXTRACTOR_SCRIPT], check=True)
+        else:
+            return False
+
+    if not os.path.exists(QUOTES_JSON):
+        return False
+
+    try:
+        with open(QUOTES_JSON, 'r', encoding='utf-8') as f:
+            quotes = json.load(f)
+
+        offsets = []
+        with open(QUOTES_JSONL, 'wb') as f_out:
+            for q in quotes:
+                offsets.append(f_out.tell())
+                line = json.dumps(q, ensure_ascii=False) + '\n'
+                f_out.write(line.encode('utf-8'))
+
+        with open(QUOTES_IDX, 'wb') as f_idx:
+            f_idx.write(struct.pack(f'<{len(offsets)}I', *offsets))
+        return True
+    except Exception as e:
+        print(f'Index generation error: {e}', file=sys.stderr)
+        return False
+
+
+def get_fast_random_quote(min_len=30, max_attempts=20):
+    """Instant O(1) random quote lookup directly from binary index (<1ms)."""
+    if not build_index_if_needed():
+        return None
+
+    try:
+        idx_size = os.path.getsize(QUOTES_IDX)
+        total_quotes = idx_size // 4
+        if total_quotes == 0:
+            return None
+
+        with open(QUOTES_IDX, 'rb') as f_idx, open(QUOTES_JSONL, 'rb') as f_jsonl:
+            for _ in range(max_attempts):
+                rand_idx = random.randint(0, total_quotes - 1)
+                f_idx.seek(rand_idx * 4)
+                offset = struct.unpack('<I', f_idx.read(4))[0]
+                f_jsonl.seek(offset)
+                line = f_jsonl.readline().decode('utf-8', errors='replace')
+                quote = json.loads(line)
+                if len(quote.get('text', '')) >= min_len:
+                    return quote
+            # Fallback to last retrieved
+            return quote
+    except Exception:
+        return None
+
+
+def load_all_quotes():
+    """Load all quotes for complex filtering, stats, or character listing."""
+    if not build_index_if_needed():
+        return []
+    quotes = []
+    if os.path.exists(QUOTES_JSONL):
+        with open(QUOTES_JSONL, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    quotes.append(json.loads(line))
+    elif os.path.exists(QUOTES_JSON):
+        with open(QUOTES_JSON, 'r', encoding='utf-8') as f:
+            quotes = json.load(f)
+    return quotes
+
+
+def clean_quote_text(text: str) -> str:
+    """Format quote string with clean typographic quotes."""
+    text = text.strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith('“') and text.endswith('”')):
+        text = text[1:-1].strip()
+    return f'“{text}”'
+
+
+def format_minimal(quote, term_width=80, show_chapter=True):
+    """
+    Clean, minimalist display:
+    “Quote text goes here neatly wrapped...”
+      ― Minakami Yuki (Down the Rabbit-Hole I)
+    """
+    text = clean_quote_text(quote['text'])
+    speaker = quote.get('speaker', '').strip()
+    chapter = quote.get('chapter', '').strip()
+
+    max_width = min(max(term_width - 4, 30), 80)
+    wrapped = textwrap.wrap(text, width=max_width)
+
+    lines = [col(CYAN, line) for line in wrapped]
+
+    # Attribution
+    if speaker:
+        attr = f'  {col(GRAY, "―")} {col(ROSE, speaker)}'
+        if show_chapter and chapter and chapter != 'Prologue':
+            attr += f' {col(GRAY, f"({chapter})")}'
+        lines.append(attr)
+    elif chapter and show_chapter:
+        lines.append(f'  {col(GRAY, f"― {chapter}")}')
+
+    return '\n'.join(lines)
+
+
+def format_card(quote, term_width=80, show_chapter=True):
+    """Left accent bar styling."""
+    text = clean_quote_text(quote['text'])
+    speaker = quote.get('speaker', '').strip()
+    chapter = quote.get('chapter', '').strip()
+
+    max_width = min(max(term_width - 6, 30), 80)
+    wrapped = textwrap.wrap(text, width=max_width)
+
+    bar = col(PURPLE, '▌ ')
+    lines = [f'{bar}{col(CYAN, line)}' for line in wrapped]
+
+    attr_parts = []
+    if speaker:
+        attr_parts.append(col(ROSE, speaker))
+    if show_chapter and chapter:
+        attr_parts.append(col(GRAY, f'({chapter})'))
+
+    if attr_parts:
+        lines.append(f'{bar}{col(GRAY, "― ")}{" ".join(attr_parts)}')
+
+    return '\n'.join(lines)
+
+
+def format_box(quote, term_width=80, show_chapter=True):
+    """Rounded Unicode frame styling."""
+    text = clean_quote_text(quote['text'])
+    speaker = quote.get('speaker', '').strip()
+    chapter = quote.get('chapter', '').strip()
+
+    box_width = min(max(term_width - 4, 40), 78)
+    inner_width = box_width - 4
+
+    wrapped_lines = textwrap.wrap(text, width=inner_width)
+    if not wrapped_lines:
+        wrapped_lines = [text]
+
+    attr_parts = []
+    if speaker:
+        attr_parts.append(speaker)
+    if show_chapter and chapter and chapter != 'Prologue':
+        attr_parts.append(f'[{chapter}]')
+
+    attr_line = ' ― ' + ', '.join(attr_parts) if attr_parts else ''
+
+    top_border = col(GRAY, '╭' + '─' * (box_width - 2) + '╮')
+    bottom_border = col(GRAY, '╰' + '─' * (box_width - 2) + '╯')
+    bar = col(GRAY, '│')
+
+    lines = [top_border]
+    for wl in wrapped_lines:
+        colored_text = col(CYAN, wl)
+        pad = ' ' * (inner_width - len(wl))
+        lines.append(f'{bar}  {colored_text}{pad}  {bar}')
+
+    if attr_line:
+        lines.append(f'{bar}{" " * (box_width - 2)}{bar}')
+        attr_display = col(ROSE, attr_line)
+        pad_left = ' ' * (inner_width - len(attr_line))
+        lines.append(f'{bar}  {pad_left}{attr_display}  {bar}')
+
+    lines.append(bottom_border)
+    return '\n'.join(lines)
+
+
+def format_plain(quote):
+    """Raw plain text."""
+    text = quote['text'].strip()
+    speaker = quote.get('speaker', '').strip()
+    chapter = quote.get('chapter', '').strip()
+    if speaker:
+        return f'{speaker}: {text} ({chapter})'
+    return f'{text} ({chapter})'
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='SubaHibi Quote of the Day / Terminal Greeting'
+    )
+    parser.add_argument(
+        '-c', '--character',
+        help='Filter quotes by character name (e.g. Yuki, Zakuro, Takuji, Kimika, Hasaki, Ayana)'
+    )
+    parser.add_argument(
+        '-d', '--dialogue', action='store_true',
+        help='Show only spoken dialogue lines'
+    )
+    parser.add_argument(
+        '-m', '--monologue', action='store_true',
+        help='Show only narrative / monologue quotes'
+    )
+    parser.add_argument(
+        '--chapter',
+        help='Filter by chapter name (e.g. "Rabbit-Hole", "Invention", "Insects", "Jabberwocky")'
+    )
+    parser.add_argument(
+        '-s', '--search',
+        help='Search quotes containing a specific word or phrase'
+    )
+    parser.add_argument(
+        '--style', choices=['minimal', 'card', 'box'], default='minimal',
+        help='Visual style: "minimal" (default), "card" (accent bar), or "box" (rounded border)'
+    )
+    parser.add_argument(
+        '-p', '--plain', action='store_true',
+        help='Plain text output (no colors or boxes, ideal for piping)'
+    )
+    parser.add_argument(
+        '--no-chapter', action='store_true',
+        help='Hide the chapter name in the attribution'
+    )
+    parser.add_argument(
+        '--min-len', type=int, default=30,
+        help='Minimum quote character length (default: 30)'
+    )
+    parser.add_argument(
+        '--list-characters', action='store_true',
+        help='List all characters and their quote counts'
+    )
+    parser.add_argument(
+        '--stats', action='store_true',
+        help='Show database statistics'
+    )
+    parser.add_argument(
+        '--re-extract', action='store_true',
+        help='Force re-extraction of quotes from game files'
+    )
+
+    args = parser.parse_args()
+
+    if args.re_extract:
+        if os.path.exists(EXTRACTOR_SCRIPT):
+            subprocess.run([sys.executable, EXTRACTOR_SCRIPT])
+            # Invalidate old index
+            if os.path.exists(QUOTES_IDX): os.remove(QUOTES_IDX)
+            if os.path.exists(QUOTES_JSONL): os.remove(QUOTES_JSONL)
+            build_index_if_needed()
+            return
+        else:
+            print(f'Extractor script not found at {EXTRACTOR_SCRIPT}', file=sys.stderr)
+            return
+
+    # Check if this is the default no-filter invocation (terminal startup greeting)
+    is_simple_random = not any([
+        args.character, args.dialogue, args.monologue, args.chapter,
+        args.search, args.list_characters, args.stats
+    ])
+
+    chosen = None
+    if is_simple_random:
+        # Lightning fast path (< 1ms)
+        chosen = get_fast_random_quote(min_len=args.min_len)
+
+    if chosen is None:
+        # Load all quotes for complex filter, list, or fallback
+        quotes = load_all_quotes()
+        if not quotes:
+            print('No quotes available. Try running with --re-extract', file=sys.stderr)
+            return
+
+        if args.list_characters:
+            counts = {}
+            for q in quotes:
+                sp = q.get('speaker', '').strip()
+                if sp:
+                    counts[sp] = counts.get(sp, 0) + 1
+            print(f'{col(BOLD, "SubaHibi Characters:")}')
+            for sp, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+                print(f'  {col(ROSE, sp):<28} {col(GRAY, str(cnt) + " quotes")}')
+            return
+
+        if args.stats:
+            spoken = sum(1 for q in quotes if q.get('is_dialogue'))
+            monologues = sum(1 for q in quotes if not q.get('is_dialogue'))
+            chapters = set(q.get('chapter', '') for q in quotes)
+            print(f'{col(BOLD, "SubaHibi Quote Database:")}')
+            print(f'  Total unique quotes:  {col(CYAN, str(len(quotes)))}')
+            print(f'  Spoken dialogue:      {col(ROSE, str(spoken))}')
+            print(f'  Monologues/Narrative: {col(PEACH, str(monologues))}')
+            print(f'  Chapters covered:     {col(PURPLE, str(len(chapters)))}')
+            return
+
+        filtered = quotes
+
+        if args.min_len > 0:
+            filtered = [q for q in filtered if len(q['text']) >= args.min_len]
+
+        if args.dialogue:
+            filtered = [q for q in filtered if q.get('is_dialogue')]
+
+        if args.monologue:
+            filtered = [q for q in filtered if not q.get('is_dialogue')]
+
+        if args.character:
+            cq = args.character.lower()
+            filtered = [q for q in filtered if cq in q.get('speaker', '').lower()]
+
+        if args.chapter:
+            chq = args.chapter.lower()
+            filtered = [q for q in filtered if chq in q.get('chapter', '').lower()]
+
+        if args.search:
+            sq = args.search.lower()
+            filtered = [q for q in filtered if sq in q['text'].lower()]
+
+        if not filtered:
+            print('No quotes match your filter criteria.', file=sys.stderr)
+            return
+
+        chosen = random.choice(filtered)
+
+    if args.plain:
+        print(format_plain(chosen))
+        return
+
+    term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
+    show_ch = not args.no_chapter
+
+    if args.style == 'box':
+        print(format_box(chosen, term_width, show_ch))
+    elif args.style == 'card':
+        print(format_card(chosen, term_width, show_ch))
+    else:  # minimal (default)
+        print(format_minimal(chosen, term_width, show_ch))
+
+
+if __name__ == '__main__':
+    main()
